@@ -1,0 +1,191 @@
+# android-16kb-check
+
+Your Play Console upload was rejected for 16 KB page alignment, or you want to
+find out before you upload. This is a shell script that answers that question
+against the actual `.apk` or `.aab` file, on your machine, in a few seconds.
+
+```
+$ android-16kb-check app-release.aab
+==> artifact : app-release.aab
+==> objdump  : /Users/you/Library/Android/sdk/ndk/28.2.13676358/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-objdump
+==> archive  : bundletool (bundletool)
+
+==> Archive alignment
+    [ok]   bundle config declares PAGE_ALIGNMENT_16K
+
+==> ELF LOAD segment alignment (must be >= 2**14)
+    arm64-v8a      libapp.so                              [ok]   min align 2**16
+    arm64-v8a      libflutter.so                          [ok]   min align 2**14
+    arm64-v8a      libsomevendor.so                       [FAIL] min align 2**12
+    armeabi-v7a    [SKIP] 32-bit, exempt (3 libs)
+
+FAIL — at least one 64-bit library is not 16 KB aligned.
+  Play will reject this upload.
+```
+
+## The requirement
+
+Since **2025-11-01** Google Play requires 16 KB memory page support for apps
+that target API 35 or higher and run on 64-bit devices. It is checked when the
+artifact is uploaded, before review, so a failure rejects the build rather than
+delaying it.
+
+Two independent things have to hold, and both are checked here:
+
+1. **Archive alignment.** Native libraries have to be stored uncompressed and
+   16 KB-aligned inside the zip. The Android Gradle Plugin does this from
+   8.5.1 onward. In an AAB it appears as `PAGE_ALIGNMENT_16K` in the bundle
+   config; in an APK it is what `zipalign -c -P 16 4` verifies.
+
+2. **ELF alignment.** Every `LOAD` segment of every 64-bit `.so` must be
+   aligned to at least `2**14`. NDK r28 and newer link this way by default.
+
+These fail independently. A perfectly linked library stored compressed still
+breaks on device, and a badly linked library stored with flawless zip alignment
+breaks too. Checking one is not checking the other.
+
+32-bit `armeabi-v7a` is exempt — 16 KB pages are a 64-bit feature — and is
+reported as `SKIP` rather than passed over silently.
+
+## Exit codes
+
+| exit | meaning | what to do |
+|---|---|---|
+| `0` | Aligned. Archive alignment is correct and every 64-bit library has all LOAD segments at `2**14` or better. | Upload. |
+| `1` | Not aligned. Play would reject this upload. | Fix it — see below. |
+| `2` | **Could not verify.** A required tool or the artifact is missing, or the artifact has nothing to check. | Install the missing tool and run again. |
+
+**Exit code 2 is not a pass.** This matters more than it looks. A checker that
+cannot find its toolchain has learned nothing about the artifact, and the
+common failure mode in scripts like this one is to report success anyway —
+which turns a build gate into a decoration. Here, every path that could not
+look ends in `2`, distinct from both the pass and the fail, and says so in
+plain words on stderr.
+
+The practical consequence: if you wire this into a build script, treat `1` as
+fatal and `2` as a loud warning that the gate is **unproven**. Never fold `2`
+into `0`.
+
+```bash
+android-16kb-check "$AAB" || case $? in
+  1) echo "unaligned — refusing to release"; exit 1 ;;
+  2) echo "WARNING: 16 KB alignment is UNVERIFIED on this machine" ;;
+esac
+```
+
+Cases that deliberately return `2` rather than `0`:
+
+- No `llvm-objdump`, no `bundletool`, or no `zipalign`.
+- An artifact containing no native libraries at all — there was nothing to
+  measure.
+- An artifact containing only 32-bit ABIs. That proves nothing about the
+  64-bit build users will install.
+
+## Install
+
+It is one file with no dependencies beyond the Android toolchain it calls.
+
+```bash
+curl -fsSLo /usr/local/bin/android-16kb-check \
+  https://raw.githubusercontent.com/saimskywalker/android-16kb-check/main/android-16kb-check
+chmod +x /usr/local/bin/android-16kb-check
+```
+
+Or clone the repository and run `./android-16kb-check` in place.
+
+## Usage
+
+```bash
+# An app bundle (what you upload to Play)
+android-16kb-check build/app/outputs/bundle/release/app-release.aab
+
+# An APK
+android-16kb-check build/app/outputs/apk/release/app-release.apk
+
+# Point at a specific NDK rather than letting it auto-detect
+android-16kb-check --ndk "$ANDROID_HOME/ndk/28.2.13676358" app-release.aab
+
+# bundletool as a downloaded jar instead of a PATH executable
+android-16kb-check --bundletool ~/tools/bundletool-all.jar app-release.aab
+```
+
+| option | effect |
+|---|---|
+| `--ndk <dir>` | Take `llvm-objdump` from this NDK. Overrides auto-detection; if the directory has no `llvm-objdump` the run fails rather than falling back to some other one. |
+| `--bundletool <cmd>` | Executable, or a path ending in `.jar` which is run as `java -jar`. AAB only. |
+| `-h`, `--help` | Usage, then exit 0. |
+| `-V`, `--version` | Version, then exit 0. |
+
+Environment variables: `ANDROID_NDK_HOME` (or `ANDROID_NDK_ROOT`) is equivalent
+to `--ndk`; `ANDROID_HOME` (or `ANDROID_SDK_ROOT`) is used to find the highest
+installed `ndk/<version>` and the newest `build-tools/<version>/zipalign`;
+`BUNDLETOOL` is equivalent to `--bundletool`.
+
+## Prerequisites
+
+| tool | needed for | install |
+|---|---|---|
+| `llvm-objdump` | the ELF check, always | ships in the NDK: `sdkmanager 'ndk;28.2.13676358'`. GNU `objdump` on PATH also works — it prints the same `align 2**N` form. |
+| `bundletool` | AAB input | `brew install bundletool`, or download `bundletool-all.jar` from [the releases page](https://github.com/google/bundletool/releases) and pass `--bundletool` |
+| `zipalign` | APK input | ships in the SDK: `sdkmanager 'build-tools;35.0.0'` |
+| `unzip` | reading libraries out of the archive | preinstalled on macOS; `apt-get install unzip` on Debian/Ubuntu |
+
+If the NDK lives somewhere non-standard, set `ANDROID_HOME` or pass `--ndk`.
+Auto-detection looks at `$ANDROID_HOME/ndk/*` (highest version wins), then
+`~/Library/Android/sdk` and `~/Android/Sdk`, then PATH.
+
+## Reading a failure
+
+A `[FAIL]` line names the ABI and the library. That name is the whole answer,
+because the fix depends on who built the file.
+
+**Libraries you compile yourself** are aligned by NDK r28 or newer. If one of
+yours fails, raise the NDK version your build uses and rebuild.
+
+**Libraries that arrive prebuilt inside a dependency** — an AAR, a Flutter
+plugin, a Maven artifact — were built with whatever NDK their author used, and
+your own NDK version has no effect on them whatsoever. This is the common case,
+and it is the one this tool exists for: your NDK pin tells you nothing about
+these files, so they have to be measured on the artifact.
+
+**This tool cannot fix a prebuilt `.so`.** Relinking someone else's binary is
+not something a checker can do. The remedy is to find the dependency that ships
+the named library and upgrade it to a release built with a 16 KB-capable NDK,
+or drop the dependency. If neither is possible, the upstream project needs a
+bug report; there is no local workaround.
+
+A failure on the archive half instead — `PAGE_ALIGNMENT_16K` missing, or
+`zipalign` reporting bad entries — is a build configuration problem, not a
+dependency problem. Upgrade the Android Gradle Plugin to 8.5.1 or newer.
+
+## What this does and does not prove
+
+It proves what a static read of the artifact can prove: how the libraries are
+stored in the zip, and what alignment each 64-bit ELF declares for its LOAD
+segments. That is exactly the pair of properties Play checks at upload, which
+is why passing here and passing there tend to agree.
+
+It does not run the app. A library can be aligned and still crash on a 16 KB
+device for unrelated reasons — a hardcoded `PAGE_SIZE` constant, an assumption
+about `mmap` granularity, a bundled runtime that pages things in itself. Static
+alignment is a necessary condition, not a sufficient one. Testing on a 16 KB
+page-size emulator image remains worthwhile.
+
+It also says nothing about libraries loaded at runtime rather than shipped in
+the archive.
+
+## Running the tests
+
+```bash
+test/run.sh                # everything
+test/run.sh toolchain      # a substring filter on test names
+```
+
+The suite needs no Android SDK and no real APK. External tools are replaced by
+stubs in `test/stubs`, and the artifacts by small archives in `test/fixtures`
+that have the right internal layout and nothing else. `shellcheck` runs over
+the script, the harness and the stubs in CI.
+
+## License
+
+MIT. See [LICENSE](LICENSE).

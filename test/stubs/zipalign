@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Stub zipalign. STUB_ZIPALIGN_RC decides the verification result.
+set -eu
+rc="${STUB_ZIPALIGN_RC:-0}"
+if [[ "${rc}" == "0" ]]; then
+  echo "Verification successful"
+else
+  echo "BAD - lib/arm64-v8a/libexample.so (BAD - 4096)"
+fi
+exit "${rc}"

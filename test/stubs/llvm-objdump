@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Stub llvm-objdump. Prints a program-header table in the same shape the real
+# one does for `-p`, with the LOAD alignment controlled by STUB_OBJDUMP_ALIGN.
+set -eu
+if [[ "${STUB_OBJDUMP_FAIL:-0}" == "1" ]]; then
+  echo "stub llvm-objdump: forced failure" >&2
+  exit 3
+fi
+align="${STUB_OBJDUMP_ALIGN:-2**14}"
+if [[ "${STUB_OBJDUMP_NO_LOAD:-0}" == "1" ]]; then
+  printf '\nProgram Header:\n'
+  printf '    PHDR off 0x40 vaddr 0x40 paddr 0x40 align 2**3\n'
+  exit 0
+fi
+printf '\nProgram Header:\n'
+printf '    PHDR off 0x0000000000000040 vaddr 0x0000000000000040 paddr 0x0000000000000040 align 2**3\n'
+printf '    LOAD off 0x0000000000000000 vaddr 0x0000000000000000 paddr 0x0000000000000000 align %s\n' "${align}"
+printf '    LOAD off 0x0000000000010000 vaddr 0x0000000000010000 paddr 0x0000000000010000 align %s\n' "${align}"
+printf ' DYNAMIC off 0x0000000000020000 vaddr 0x0000000000020000 paddr 0x0000000000020000 align 2**3\n'

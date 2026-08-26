@@ -1,0 +1,9 @@
+# Nothing here is built, so this list is short on purpose.
+*.apk
+*.aab
+!test/fixtures/*.apk
+!test/fixtures/*.aab
+
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck unzip
+
+      - name: shellcheck
+        run: shellcheck android-16kb-check test/run.sh test/stubs/*
+
+      - name: Tests
+        run: test/run.sh
+
+      # The suite stubs the toolchain, so it cannot notice that the real
+      # entry point stopped being runnable. Two cheap smoke checks that it is.
+      - name: Executable bit and help
+        run: |
+          set -euo pipefail
+          test -x android-16kb-check
+          ./android-16kb-check --help > /dev/null
+
+      # The one behaviour worth asserting outside the harness: on a machine
+      # with no Android toolchain at all, this must report "could not verify"
+      # and not success. A checker that passes when it cannot look is the
+      # thing this project exists to avoid.
+      - name: Missing toolchain reports 2, not 0
+        run: |
+          # +e on purpose: the point of this step is to read a non-zero code,
+          # and GitHub's default shell is `bash -e`.
+          set +e
+          ./android-16kb-check --ndk /nonexistent-ndk test/fixtures/sample.apk
+          rc=$?
+          set -e
+          echo "exit code: $rc"
+          if [ "$rc" -ne 2 ]; then
+            echo "::error::expected exit 2 (could not verify), got $rc"
+            exit 1
+          fi

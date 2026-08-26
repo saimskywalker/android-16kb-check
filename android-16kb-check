@@ -1,0 +1,439 @@
+#!/usr/bin/env bash
+#
+# android-16kb-check — verify an Android APK or AAB satisfies Google Play's
+# 16 KB memory-page requirement.
+#
+# Play has required 16 KB page support since 2025-11-01 for apps targeting
+# API 35+ on 64-bit devices, and it enforces this AT UPLOAD: a failure rejects
+# the artifact before review ever runs. Two independent things have to hold.
+#
+#   1. Archive alignment. Native libraries must be stored uncompressed and
+#      16 KB-aligned inside the zip. AGP >= 8.5.1 does this; it shows up as
+#      PAGE_ALIGNMENT_16K in an AAB's bundle config, or as a clean
+#      `zipalign -c -P 16 4` on an APK.
+#
+#   2. ELF alignment. Every LOAD segment of every 64-bit .so must be aligned
+#      to at least 2**14. NDK r28+ links this way by default, but the .so
+#      files inside a dependency's AAR were built with whatever NDK its author
+#      used, so your own NDK version says nothing about them. This is the half
+#      that actually has to be measured on the artifact.
+#
+# 32-bit armeabi-v7a is exempt (16 KB pages are a 64-bit feature) and is
+# reported as SKIP rather than passed over silently.
+#
+# Exit codes — see --help. 2 means "could not verify" and is NOT a pass.
+
+set -euo pipefail
+
+PROGRAM="android-16kb-check"
+VERSION="1.0.0"
+
+# The three-way exit contract. 2 exists so a machine without the toolchain
+# reports "unproven" instead of "fine", which is the failure mode that lets an
+# unaligned library reach Play.
+readonly EXIT_ALIGNED=0
+readonly EXIT_UNALIGNED=1
+readonly EXIT_CANNOT_VERIFY=2
+
+usage() {
+  cat <<EOF
+${PROGRAM} ${VERSION}
+
+Verify that an Android APK or AAB meets Google Play's 16 KB page-size
+requirement, before you upload it.
+
+USAGE
+  ${PROGRAM} [options] <path-to.apk|path-to.aab>
+
+OPTIONS
+  --ndk <dir>          Android NDK to take llvm-objdump from. Overrides all
+                       auto-detection; if this directory has no llvm-objdump
+                       the run fails rather than falling back.
+  --bundletool <cmd>   bundletool executable, or a path ending in .jar which
+                       is then run as 'java -jar <path>'. AAB only.
+  -h, --help           Show this help and exit 0.
+  -V, --version        Print the version and exit 0.
+
+ENVIRONMENT
+  ANDROID_NDK_HOME     Same meaning as --ndk (ANDROID_NDK_ROOT also read).
+  ANDROID_HOME         SDK root; the highest \$ANDROID_HOME/ndk/<version> is
+                       used when no NDK is named explicitly.
+                       ANDROID_SDK_ROOT also read.
+  BUNDLETOOL           Same meaning as --bundletool.
+
+EXIT CODES
+  0  Aligned. Archive alignment is correct and every 64-bit library has all
+     LOAD segments at 2**14 or better.
+  1  Not aligned. Play would reject this upload.
+  2  Could not verify — a required tool or the artifact is missing, or the
+     artifact has nothing to check. THIS IS NOT A PASS. Treat it as an
+     unproven gate, never as a green light.
+
+PREREQUISITES
+  llvm-objdump   from an Android NDK (sdkmanager 'ndk;28.2.13676358').
+                 GNU objdump on PATH also works; it prints the same
+                 'align 2**N' form.
+  bundletool     for AAB input: brew install bundletool
+  zipalign       for APK input: ships in \$ANDROID_HOME/build-tools/<version>/
+  unzip          to read the libraries out of the archive.
+EOF
+}
+
+# Every "cannot verify" path funnels through here so the distinction between
+# "unaligned" and "unproven" can never be blurred by a stray exit 1.
+cannot_verify() {
+  printf '%s: CANNOT VERIFY — %s\n' "${PROGRAM}" "$1" >&2
+  shift
+  local line
+  for line in "$@"; do
+    printf '  %s\n' "${line}" >&2
+  done
+  printf '  Exit code 2 means unproven, not passed.\n' >&2
+  exit "${EXIT_CANNOT_VERIFY}"
+}
+
+# ------------------------------------------------------------------ options --
+
+ARTIFACT=""
+NDK_DIR=""
+NDK_SOURCE=""
+BUNDLETOOL_SPEC="${BUNDLETOOL:-}"
+positional=()
+end_of_options=0
+
+if [[ -n "${ANDROID_NDK_HOME:-}" ]]; then
+  NDK_DIR="${ANDROID_NDK_HOME}"
+  NDK_SOURCE="ANDROID_NDK_HOME"
+elif [[ -n "${ANDROID_NDK_ROOT:-}" ]]; then
+  NDK_DIR="${ANDROID_NDK_ROOT}"
+  NDK_SOURCE="ANDROID_NDK_ROOT"
+fi
+
+need_value() {
+  # $1 = flag name, $2 = number of args remaining after the flag
+  if (( $2 == 0 )); then
+    cannot_verify "$1 requires a value." "Run ${PROGRAM} --help for usage."
+  fi
+}
+
+while (( $# )); do
+  if (( end_of_options )); then
+    positional+=("$1")
+    shift
+    continue
+  fi
+  case "$1" in
+    --) end_of_options=1 ;;
+    -h|--help) usage; exit "${EXIT_ALIGNED}" ;;
+    -V|--version) printf '%s %s\n' "${PROGRAM}" "${VERSION}"; exit "${EXIT_ALIGNED}" ;;
+    --ndk) need_value --ndk $(( $# - 1 )); NDK_DIR="$2"; NDK_SOURCE="--ndk"; shift ;;
+    --ndk=*) NDK_DIR="${1#--ndk=}"; NDK_SOURCE="--ndk"
+             [[ -n "${NDK_DIR}" ]] || cannot_verify "--ndk requires a value." ;;
+    --bundletool) need_value --bundletool $(( $# - 1 )); BUNDLETOOL_SPEC="$2"; shift ;;
+    --bundletool=*) BUNDLETOOL_SPEC="${1#--bundletool=}"
+                    [[ -n "${BUNDLETOOL_SPEC}" ]] || cannot_verify "--bundletool requires a value." ;;
+    -*) cannot_verify "unknown option: $1" "Run ${PROGRAM} --help for usage." ;;
+    *) positional+=("$1") ;;
+  esac
+  shift
+done
+
+if (( ${#positional[@]} == 0 )); then
+  cannot_verify "no artifact given." \
+    "Usage: ${PROGRAM} [options] <path-to.apk|path-to.aab>" \
+    "Run ${PROGRAM} --help for the full option list."
+fi
+if (( ${#positional[@]} > 1 )); then
+  cannot_verify "expected exactly one artifact, got ${#positional[@]}." \
+    "Extra arguments: ${positional[*]:1}"
+fi
+ARTIFACT="${positional[0]}"
+
+if [[ ! -e "${ARTIFACT}" ]]; then
+  cannot_verify "artifact not found: ${ARTIFACT}" \
+    "Build one first, then point this tool at the .aab or .apk it produced."
+fi
+if [[ ! -f "${ARTIFACT}" ]]; then
+  cannot_verify "not a regular file: ${ARTIFACT}"
+fi
+
+case "${ARTIFACT}" in
+  *.aab) KIND=aab ;;
+  *.apk) KIND=apk ;;
+  *) cannot_verify "expected a .aab or .apk, got: ${ARTIFACT}" \
+       "The check reads the archive layout, which differs between the two." ;;
+esac
+
+# ----------------------------------------------------------------- toolchain --
+# Everything is resolved up front. Failing after half the work is done invites
+# reading a partial report as a result.
+
+command -v unzip >/dev/null 2>&1 || cannot_verify "unzip not found on PATH." \
+  "It is needed to read the native libraries out of the archive." \
+  "Debian/Ubuntu: apt-get install unzip    macOS: preinstalled"
+
+SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+if [[ -z "${SDK_ROOT}" ]]; then
+  for candidate in "${HOME}/Library/Android/sdk" "${HOME}/Android/Sdk"; do
+    if [[ -d "${candidate}" ]]; then
+      SDK_ROOT="${candidate}"
+      break
+    fi
+  done
+fi
+
+# llvm-objdump inside an NDK lives under a host-triple directory whose name is
+# not knowable up front (darwin-x86_64, linux-x86_64, ...), hence the glob.
+objdump_in_ndk() {
+  local ndk="$1" cand
+  for cand in "${ndk}"/toolchains/llvm/prebuilt/*/bin/llvm-objdump; do
+    if [[ -x "${cand}" ]]; then
+      printf '%s\n' "${cand}"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Highest installed NDK, by numeric version fields rather than string order, so
+# 28.2.x sorts above 9.x. sort -V is deliberately avoided; it is not portable.
+# Prints nothing when the SDK has no ndk directory.
+highest_ndk() {
+  local root="$1" dir
+  local -a dirs=()
+  for dir in "${root}"/ndk/*/; do
+    [[ -d "${dir}" ]] || continue
+    dirs+=("${dir%/}")
+  done
+  (( ${#dirs[@]} )) || return 0
+  printf '%s\n' "${dirs[@]}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+}
+
+OBJDUMP=""
+if [[ -n "${NDK_DIR}" ]]; then
+  # An explicitly named NDK is authoritative. Silently falling back to some
+  # other objdump would report on a toolchain nobody asked for.
+  if ! OBJDUMP="$(objdump_in_ndk "${NDK_DIR}")"; then
+    cannot_verify "no llvm-objdump under the NDK named by ${NDK_SOURCE}: ${NDK_DIR}" \
+      "Expected ${NDK_DIR}/toolchains/llvm/prebuilt/<host>/bin/llvm-objdump" \
+      "Install it with: sdkmanager 'ndk;28.2.13676358'" \
+      "$(if [[ "${NDK_SOURCE}" == "--ndk" ]]; then
+           echo "Or drop --ndk to fall back to auto-detection."
+         else
+           echo "Or unset ${NDK_SOURCE} to fall back to auto-detection."
+         fi)"
+  fi
+elif [[ -n "${SDK_ROOT}" && -d "${SDK_ROOT}/ndk" ]]; then
+  ndk_candidate="$(highest_ndk "${SDK_ROOT}")"
+  if [[ -n "${ndk_candidate}" ]]; then
+    OBJDUMP="$(objdump_in_ndk "${ndk_candidate}" || true)"
+  fi
+fi
+
+if [[ -z "${OBJDUMP}" ]]; then
+  OBJDUMP="$(command -v llvm-objdump 2>/dev/null || command -v objdump 2>/dev/null || true)"
+fi
+
+if [[ -z "${OBJDUMP}" ]]; then
+  cannot_verify "no llvm-objdump found." \
+    "It ships with the Android NDK. Install one:" \
+    "    sdkmanager 'ndk;28.2.13676358'" \
+    "Then set ANDROID_HOME (or pass --ndk /path/to/ndk/28.2.13676358)." \
+    "GNU objdump on PATH also works if you have binutils."
+fi
+
+# bundletool for AAB, zipalign for APK. Resolved here, used further down.
+BUNDLETOOL_CMD=()
+ZIPALIGN=""
+if [[ "${KIND}" == "aab" ]]; then
+  if [[ -n "${BUNDLETOOL_SPEC}" ]]; then
+    case "${BUNDLETOOL_SPEC}" in
+      *.jar)
+        command -v java >/dev/null 2>&1 || cannot_verify \
+          "bundletool was given as a .jar but java is not on PATH." \
+          "Install a JDK, or point --bundletool at a launcher script instead."
+        [[ -f "${BUNDLETOOL_SPEC}" ]] || cannot_verify \
+          "bundletool jar not found: ${BUNDLETOOL_SPEC}"
+        BUNDLETOOL_CMD=(java -jar "${BUNDLETOOL_SPEC}")
+        ;;
+      *)
+        if [[ -x "${BUNDLETOOL_SPEC}" ]]; then
+          BUNDLETOOL_CMD=("${BUNDLETOOL_SPEC}")
+        elif command -v "${BUNDLETOOL_SPEC}" >/dev/null 2>&1; then
+          BUNDLETOOL_CMD=("${BUNDLETOOL_SPEC}")
+        else
+          cannot_verify "bundletool not executable: ${BUNDLETOOL_SPEC}"
+        fi
+        ;;
+    esac
+  elif command -v bundletool >/dev/null 2>&1; then
+    BUNDLETOOL_CMD=(bundletool)
+  else
+    cannot_verify "bundletool not found on PATH." \
+      "It reads the bundle config, which is where an AAB records its" \
+      "archive alignment. Install it:" \
+      "    brew install bundletool" \
+      "Or download bundletool-all.jar from" \
+      "    https://github.com/google/bundletool/releases" \
+      "and pass --bundletool /path/to/bundletool-all.jar" \
+      "An APK needs zipalign instead of bundletool."
+  fi
+else
+  for cand in "${SDK_ROOT:-/nonexistent}"/build-tools/*/zipalign; do
+    # Later build-tools versions sort last; the newest is the one we want.
+    [[ -x "${cand}" ]] && ZIPALIGN="${cand}"
+  done
+  if [[ -z "${ZIPALIGN}" ]]; then
+    ZIPALIGN="$(command -v zipalign 2>/dev/null || true)"
+  fi
+  if [[ -z "${ZIPALIGN}" ]]; then
+    cannot_verify "zipalign not found." \
+      "It ships in the Android SDK build-tools and is what proves an APK's" \
+      "native libraries are stored 16 KB-aligned inside the zip." \
+      "    sdkmanager 'build-tools;35.0.0'" \
+      "Then set ANDROID_HOME to your SDK root." \
+      "Looked under: ${SDK_ROOT:-<no SDK root known>}/build-tools/*/zipalign"
+  fi
+fi
+
+# -------------------------------------------------------------------- report --
+
+printf '==> artifact : %s\n' "${ARTIFACT}"
+printf '==> objdump  : %s\n' "${OBJDUMP}"
+if [[ "${KIND}" == "aab" ]]; then
+  printf '==> archive  : %s (bundletool)\n' "${BUNDLETOOL_CMD[*]}"
+else
+  printf '==> archive  : %s (zipalign)\n' "${ZIPALIGN}"
+fi
+printf '\n'
+
+# ------------------------------------------------------------------- archive --
+# Zip-level alignment, independent of the ELF check below: a correctly-linked
+# .so stored compressed still fails on device, and a badly-linked .so stored
+# with perfect zip alignment fails too. Both have to hold.
+
+printf '==> Archive alignment\n'
+if [[ "${KIND}" == "aab" ]]; then
+  # stderr is dropped on purpose: recent JDKs print a sun.misc.Unsafe
+  # deprecation warning from bundletool's bundled protobuf on every call.
+  if ! config="$("${BUNDLETOOL_CMD[@]}" dump config --bundle="${ARTIFACT}" 2>/dev/null)"; then
+    cannot_verify "bundletool could not read ${ARTIFACT}." \
+      "Is it really an app bundle? bundletool dump config failed."
+  fi
+  if printf '%s\n' "${config}" | grep -q 'PAGE_ALIGNMENT_16K'; then
+    printf '    [ok]   bundle config declares PAGE_ALIGNMENT_16K\n'
+  else
+    printf '    [FAIL] bundle config does NOT declare PAGE_ALIGNMENT_16K\n' >&2
+    printf '           uncompressNativeLibraries block was:\n' >&2
+    printf '%s\n' "${config}" | grep -A3 'uncompressNativeLibraries' >&2 || \
+      printf '           (not present at all)\n' >&2
+    printf '\n' >&2
+    printf 'FAIL — the bundle is not storing native libraries 16 KB-aligned.\n' >&2
+    printf '  This comes from the Android Gradle Plugin. Upgrade to AGP 8.5.1 or newer.\n' >&2
+    exit "${EXIT_UNALIGNED}"
+  fi
+else
+  if "${ZIPALIGN}" -c -P 16 4 "${ARTIFACT}" >/dev/null 2>&1; then
+    printf '    [ok]   zipalign -c -P 16 4: verification successful\n'
+  else
+    printf '    [FAIL] zipalign reports the APK is not 16 KB aligned\n' >&2
+    "${ZIPALIGN}" -v -c -P 16 4 "${ARTIFACT}" 2>&1 | grep -i 'bad\|fail' >&2 || true
+    printf '\n' >&2
+    printf 'FAIL — native libraries are not stored 16 KB-aligned in the zip.\n' >&2
+    printf '  This comes from the Android Gradle Plugin. Upgrade to AGP 8.5.1 or newer.\n' >&2
+    exit "${EXIT_UNALIGNED}"
+  fi
+fi
+printf '\n'
+
+# ----------------------------------------------------------------------- ELF --
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "${WORK}"' EXIT
+
+# AABs nest their libraries under base/lib/, APKs put them at lib/.
+if [[ "${KIND}" == "aab" ]]; then
+  LIB_GLOB='base/lib/*'
+  LIB_ROOT="${WORK}/base/lib"
+else
+  LIB_GLOB='lib/*'
+  LIB_ROOT="${WORK}/lib"
+fi
+unzip -q "${ARTIFACT}" "${LIB_GLOB}" -d "${WORK}" >/dev/null 2>&1 || true
+
+if [[ ! -d "${LIB_ROOT}" ]]; then
+  cannot_verify "no native libraries found in the artifact." \
+    "Expected ${LIB_GLOB} inside ${ARTIFACT}." \
+    "Either this is the wrong file, or the build produced no .so at all." \
+    "An app with no native code has nothing for this check to measure."
+fi
+
+printf '==> ELF LOAD segment alignment (must be >= 2**14)\n'
+fail=0
+found64=0
+for abi_dir in "${LIB_ROOT}"/*; do
+  [[ -d "${abi_dir}" ]] || continue
+  abi="$(basename "${abi_dir}")"
+
+  # 16 KB pages are a 64-bit feature. Say so out loud — an ABI reported
+  # nowhere reads exactly like an ABI that passed.
+  if [[ "${abi}" != *64* ]]; then
+    n="$(find "${abi_dir}" -name '*.so' | wc -l | tr -d ' ')"
+    printf '    %-14s [SKIP] 32-bit, exempt (%s libs)\n' "${abi}" "${n}"
+    continue
+  fi
+  found64=1
+
+  for so in "${abi_dir}"/*.so; do
+    [[ -f "${so}" ]] || continue
+    so_name="$(basename "${so}")"
+
+    # objdump -p prints one 'align 2**N' per program header. Only LOAD
+    # matters; anything below 2**14 breaks on a 16 KB-page device.
+    if ! aligns="$("${OBJDUMP}" -p "${so}" 2>/dev/null \
+                    | awk '$1=="LOAD"{for(i=1;i<=NF;i++) if($i=="align") print $(i+1)}')"; then
+      aligns=""
+    fi
+
+    worst=99
+    while read -r token; do
+      exponent="${token#2\*\*}"
+      [[ "${exponent}" =~ ^[0-9]+$ ]] || continue
+      if (( exponent < worst )); then
+        worst="${exponent}"
+      fi
+    done <<EOF
+${aligns}
+EOF
+
+    if (( worst == 99 )); then
+      printf '    %-14s %-38s [FAIL] no LOAD segments readable\n' "${abi}" "${so_name}" >&2
+      fail=1
+    elif (( worst < 14 )); then
+      printf '    %-14s %-38s [FAIL] min align 2**%s\n' "${abi}" "${so_name}" "${worst}" >&2
+      fail=1
+    else
+      printf '    %-14s %-38s [ok]   min align 2**%s\n' "${abi}" "${so_name}" "${worst}"
+    fi
+  done
+done
+
+printf '\n'
+if (( found64 == 0 )); then
+  cannot_verify "the artifact contains no 64-bit ABI, so there is nothing to check." \
+    "16 KB pages only apply to arm64-v8a and x86_64." \
+    "A 32-bit-only build is not proof of anything about the 64-bit one."
+fi
+if (( fail )); then
+  printf 'FAIL — at least one 64-bit library is not 16 KB aligned.\n' >&2
+  printf '  Play will reject this upload.\n' >&2
+  printf '\n' >&2
+  printf '  Libraries you compile yourself are aligned by NDK r28 or newer.\n' >&2
+  printf '  A failure here is usually a PREBUILT .so shipped inside a dependency,\n' >&2
+  printf '  built with an older NDK. Bumping your own ndkVersion cannot fix that\n' >&2
+  printf '  binary — find the dependency that owns the .so named above and upgrade\n' >&2
+  printf '  it to a release that ships 16 KB-aligned libraries, or drop it.\n' >&2
+  exit "${EXIT_UNALIGNED}"
+fi
+printf 'PASS — archive alignment and every 64-bit library meet the 16 KB page requirement.\n'
+exit "${EXIT_ALIGNED}"

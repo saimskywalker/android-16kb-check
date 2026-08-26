@@ -1,0 +1,95 @@
+# Contributing
+
+Contributions are welcome. A few things worth knowing before you spend time.
+
+## How changes land
+
+Every change reaches `main` through a pull request that the maintainer reviews
+and merges. That includes changes from forks, which is the normal path — you
+cannot push to this repository directly, and nothing merges without a review.
+If a PR sits without a response, a nudge is fine.
+
+## Before opening a PR
+
+```bash
+shellcheck android-16kb-check test/run.sh test/stubs/*
+test/run.sh
+```
+
+CI runs the same two commands on `ubuntu-latest`, plus a check that the script
+is still executable and that a run with no toolchain exits 2. shellcheck must
+be clean — not "clean apart from the informational ones". If a finding is
+genuinely wrong, disable it by number with a comment saying why, the way
+`test/run.sh` does for `SC2329`.
+
+## The exit codes are the interface
+
+This tool has three answers, and the third one is the reason it exists:
+
+| exit | meaning |
+|---|---|
+| `0` | aligned |
+| `1` | unaligned — Play would reject the upload |
+| `2` | could not verify |
+
+Most scripts in this space have two answers, and quietly fold "I could not
+find my toolchain" into the passing one. That converts a release gate into
+decoration, and the failure is invisible precisely when it matters — on the
+machine that is missing something.
+
+So the rule for any change here: **no new path may reach `0` without having
+actually read the artifact.** If you are adding a fallback, a heuristic, or a
+"probably fine" case, it belongs at `2`. Every such path goes through
+`cannot_verify`, which exists so this cannot be blurred by a stray `exit 0`
+somewhere down the file. Widening what counts as a pass needs a strong case and
+a changelog entry; it is a breaking change to the interface, not a tweak.
+
+The same reasoning is why a 32-bit-only artifact and an artifact with no `.so`
+at all both exit `2` rather than `0`. Neither is evidence about the 64-bit
+build users install.
+
+## What a good bug fix looks like
+
+A test that fails without the fix. `test/run.sh` is a plain bash harness — add
+a `t_<name>` function and a `check` line at the bottom. Several existing tests
+name the mistake they guard against in a comment, and that is the shape worth
+adding to.
+
+The suite deliberately does not need an Android SDK, a JDK, or a real APK.
+External tools are replaced by stubs in `test/stubs` and artifacts by small
+archives in `test/fixtures` that have the right internal layout and nothing
+else. Please keep it that way — a suite that only runs on a configured Android
+machine is a suite that stops being run. If a change genuinely cannot be tested
+against a stub, say so in the PR rather than leaving it uncovered silently.
+
+`bats` is not used. The harness is ~200 lines of bash with no install step,
+which is a deliberate trade: one fewer thing to have installed before you can
+run the tests on the machine where the bug reproduced.
+
+## Things to be careful with
+
+**Toolchain resolution.** It has to work on a laptop with Android Studio, on a
+laptop with only command-line tools, and on a CI image with nothing but
+`ANDROID_HOME`. When adding a new place to look, add it as a *fallback* after
+the explicit ones — an NDK named by `--ndk` or `ANDROID_NDK_HOME` is
+authoritative, and quietly using a different one is worse than failing.
+
+**Parsing objdump output.** The ELF check reads `align 2**N` out of
+`objdump -p`. GNU objdump and llvm-objdump both print that form today; a change
+in either could silently produce zero matches, which is why a library with no
+readable LOAD segments is a `[FAIL]` and not a shrug.
+
+**Anything printed to stdout on the passing path.** People pipe this into build
+scripts. Keep failures and diagnostics on stderr.
+
+## Scope
+
+This reads an artifact and reports whether it meets the 16 KB page requirement.
+It does not build anything, does not modify the artifact, and cannot repair an
+unaligned library — relinking a `.so` that arrived prebuilt inside somebody
+else's AAR is not something a checker can do, and pretending otherwise would be
+the same failure as reporting a pass it did not earn.
+
+Feature requests that fit: more places to find the toolchain, clearer failure
+messages, support for artifact shapes that exist and are not handled. Feature
+requests that do not: fixing alignment, wrapping Gradle, or guessing.
