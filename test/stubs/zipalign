@@ -1,10 +1,17 @@
 #!/usr/bin/env bash
 # Stub zipalign. STUB_ZIPALIGN_RC decides the verification result.
+#
+# The real tool distinguishes these: 0 is aligned, 1 is "checked it, it is
+# misaligned", and 2 is a usage error — which is what build-tools older than
+# 35 does when handed -P, a flag its zipalign does not have. The text below
+# is copied from build-tools 34.0.0.
 set -eu
 rc="${STUB_ZIPALIGN_RC:-0}"
-if [[ "${rc}" == "0" ]]; then
-  echo "Verification successful"
-else
-  echo "BAD - lib/arm64-v8a/libexample.so (BAD - 4096)"
-fi
+case "${rc}" in
+  0) echo "Verification successful" ;;
+  1) echo "BAD - lib/arm64-v8a/libexample.so (BAD - 4096)" ;;
+  *) echo "zipalign: illegal option -- P" >&2
+     echo "ERROR: unknown flag -?" >&2
+     echo "Usage: zipalign [-f] [-p] [-v] [-z] <align> infile.zip outfile.zip" >&2 ;;
+esac
 exit "${rc}"

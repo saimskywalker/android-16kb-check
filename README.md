@@ -80,15 +80,38 @@ Cases that deliberately return `2` rather than `0`:
   measure.
 - An artifact containing only 32-bit ABIs. That proves nothing about the
   64-bit build users will install.
+- An artifact whose 64-bit ABI directory holds no `.so` at all — `lib/<abi>/`
+  can legitimately contain other files, such as `wrap.sh`. The directory is
+  reported as `[none]`, because an ABI that appears nowhere in the report
+  reads exactly like one that passed.
+- `objdump` present but unable to read a library. That is a tool that could
+  not look, not a library that failed; a failure to measure never becomes a
+  measured failure.
+- `zipalign` present but unable to run the check. Build-tools older than 35
+  has no `-P` flag, so its zipalign exits on a usage error rather than
+  reporting an alignment; that is not an answer about the archive.
+- An archive `unzip` could only partly extract. Whatever came out is a subset
+  of the artifact, and a verdict on a subset is not a verdict on the upload.
 
 ## Install
 
 It is one file with no dependencies beyond the Android toolchain it calls.
 
 ```bash
-curl -fsSLo /usr/local/bin/android-16kb-check \
+sudo curl -fsSLo /usr/local/bin/android-16kb-check \
   https://raw.githubusercontent.com/saimskywalker/android-16kb-check/main/android-16kb-check
-chmod +x /usr/local/bin/android-16kb-check
+sudo chmod +x /usr/local/bin/android-16kb-check
+```
+
+`/usr/local/bin` is root-owned on macOS and on a stock Ubuntu, so without
+`sudo` curl exits `56` having written nothing. To install without root, put it
+somewhere you own and make sure that directory is on `PATH`:
+
+```bash
+mkdir -p ~/.local/bin
+curl -fsSLo ~/.local/bin/android-16kb-check \
+  https://raw.githubusercontent.com/saimskywalker/android-16kb-check/main/android-16kb-check
+chmod +x ~/.local/bin/android-16kb-check
 ```
 
 Or clone the repository and run `./android-16kb-check` in place.
@@ -111,8 +134,8 @@ android-16kb-check --bundletool ~/tools/bundletool-all.jar app-release.aab
 
 | option | effect |
 |---|---|
-| `--ndk <dir>` | Take `llvm-objdump` from this NDK. Overrides auto-detection; if the directory has no `llvm-objdump` the run fails rather than falling back to some other one. |
-| `--bundletool <cmd>` | Executable, or a path ending in `.jar` which is run as `java -jar`. AAB only. |
+| `--ndk <dir>` | Take `llvm-objdump` from this NDK. Overrides auto-detection; if the directory has no `llvm-objdump` the run fails rather than falling back to some other one. An empty value is an error, not "no `--ndk` given" — `--ndk "$UNSET_VAR"` must not silently become auto-detection. |
+| `--bundletool <cmd>` | Executable, or a path ending in `.jar` which is run as `java -jar`. AAB only. An empty value is an error, as for `--ndk`. |
 | `-h`, `--help` | Usage, then exit 0. |
 | `-V`, `--version` | Version, then exit 0. |
 

@@ -10,6 +10,8 @@ matters here is only where the entries sit inside the archive.
 | `sample.aab` | the same, nested under `base/lib/` as an AAB stores it |
 | `no-native-libs.apk` | no `lib/` directory at all |
 | `only-32bit.apk` | `lib/armeabi-v7a/` only, no 64-bit ABI |
+| `empty-64bit-abi.apk` | `lib/arm64-v8a/` holding only a `wrap.sh`, so there is a 64-bit ABI directory but no 64-bit library to measure |
+| `unreadable-entry.apk` | two 64-bit `.so`, one of them stored with a compression method `unzip` cannot decode, so extraction is necessarily partial |
 
 Committed as binaries so the suite needs no zip tool. Regenerate with
 `make-fixtures.py` if the layout ever has to change.

@@ -110,8 +110,13 @@ elif [[ -n "${ANDROID_NDK_ROOT:-}" ]]; then
 fi
 
 need_value() {
-  # $1 = flag name, $2 = number of args remaining after the flag
-  if (( $2 == 0 )); then
+  # $1 = flag name, $2 = number of args remaining after the flag, $3 = the
+  # value itself. An EMPTY value is rejected as hard as an absent one: an
+  # unset variable in a caller's script (--ndk "$NDK_HOME") would otherwise
+  # look like "no --ndk at all", and the run would quietly fall back to
+  # auto-detection after being told which toolchain to use. That is the
+  # silent-fallback failure this tool exists to refuse.
+  if (( $2 == 0 )) || [[ -z "${3:-}" ]]; then
     cannot_verify "$1 requires a value." "Run ${PROGRAM} --help for usage."
   fi
 }
@@ -126,10 +131,10 @@ while (( $# )); do
     --) end_of_options=1 ;;
     -h|--help) usage; exit "${EXIT_ALIGNED}" ;;
     -V|--version) printf '%s %s\n' "${PROGRAM}" "${VERSION}"; exit "${EXIT_ALIGNED}" ;;
-    --ndk) need_value --ndk $(( $# - 1 )); NDK_DIR="$2"; NDK_SOURCE="--ndk"; shift ;;
+    --ndk) need_value --ndk $(( $# - 1 )) "${2:-}"; NDK_DIR="$2"; NDK_SOURCE="--ndk"; shift ;;
     --ndk=*) NDK_DIR="${1#--ndk=}"; NDK_SOURCE="--ndk"
              [[ -n "${NDK_DIR}" ]] || cannot_verify "--ndk requires a value." ;;
-    --bundletool) need_value --bundletool $(( $# - 1 )); BUNDLETOOL_SPEC="$2"; shift ;;
+    --bundletool) need_value --bundletool $(( $# - 1 )) "${2:-}"; BUNDLETOOL_SPEC="$2"; shift ;;
     --bundletool=*) BUNDLETOOL_SPEC="${1#--bundletool=}"
                     [[ -n "${BUNDLETOOL_SPEC}" ]] || cannot_verify "--bundletool requires a value." ;;
     -*) cannot_verify "unknown option: $1" "Run ${PROGRAM} --help for usage." ;;
@@ -195,18 +200,48 @@ objdump_in_ndk() {
   return 1
 }
 
-# Highest installed NDK, by numeric version fields rather than string order, so
-# 28.2.x sorts above 9.x. sort -V is deliberately avoided; it is not portable.
+# Is dotted version $1 strictly greater than dotted version $2?
+#
+# Done in bash rather than with `sort`, because every portable spelling of this
+# has a trap in it. `sort -V` is a GNU extension. `sort -t. -k1,1n` looks right
+# but only works on bare versions: fed whole PATHS it puts the directory prefix
+# in field 1, where a numeric compare reads it as 0 on both BSD and GNU, so the
+# major version is never compared at all and 26.3.x beats 28.2.x.
+version_gt() {
+  local -a a b
+  IFS=. read -r -a a <<<"$1"
+  IFS=. read -r -a b <<<"$2"
+  local i x y n=$(( ${#a[@]} > ${#b[@]} ? ${#a[@]} : ${#b[@]} ))
+  for (( i = 0; i < n; i++ )); do
+    x="${a[i]:-0}"
+    y="${b[i]:-0}"
+    [[ "${x}" =~ ^[0-9]+$ ]] || x=0
+    [[ "${y}" =~ ^[0-9]+$ ]] || y=0
+    # 10# so a zero-padded field is not read as octal.
+    if (( 10#${x} > 10#${y} )); then return 0; fi
+    if (( 10#${x} < 10#${y} )); then return 1; fi
+  done
+  return 1
+}
+
+# Highest installed NDK, compared by numeric version fields rather than string
+# order, so 28.2.x wins over 9.x and over 26.3.x.
 # Prints nothing when the SDK has no ndk directory.
 highest_ndk() {
-  local root="$1" dir
-  local -a dirs=()
+  local root="$1" dir name best="" best_name=""
   for dir in "${root}"/ndk/*/; do
     [[ -d "${dir}" ]] || continue
-    dirs+=("${dir%/}")
+    dir="${dir%/}"
+    name="${dir##*/}"
+    if [[ -z "${best}" ]] || version_gt "${name}" "${best_name}"; then
+      best="${dir}"
+      best_name="${name}"
+    fi
   done
-  (( ${#dirs[@]} )) || return 0
-  printf '%s\n' "${dirs[@]}" | sort -t. -k1,1n -k2,2n -k3,3n | tail -1
+  if [[ -n "${best}" ]]; then
+    printf '%s\n' "${best}"
+  fi
+  return 0
 }
 
 OBJDUMP=""
@@ -333,15 +368,30 @@ if [[ "${KIND}" == "aab" ]]; then
     exit "${EXIT_UNALIGNED}"
   fi
 else
-  if "${ZIPALIGN}" -c -P 16 4 "${ARTIFACT}" >/dev/null 2>&1; then
+  # zipalign's status is read on its own, for the same reason objdump's is
+  # below: 1 means it checked the archive and found it misaligned, and
+  # anything above that means it never got as far as checking. The case that
+  # actually happens is build-tools older than 35, whose zipalign has no -P
+  # flag at all and exits 2 on the usage error — reading that as "not
+  # aligned" announces a rejection about an archive nobody measured.
+  zipalign_status=0
+  "${ZIPALIGN}" -c -P 16 4 "${ARTIFACT}" >/dev/null 2>&1 || zipalign_status=$?
+  if (( zipalign_status == 0 )); then
     printf '    [ok]   zipalign -c -P 16 4: verification successful\n'
-  else
+  elif (( zipalign_status == 1 )); then
     printf '    [FAIL] zipalign reports the APK is not 16 KB aligned\n' >&2
     "${ZIPALIGN}" -v -c -P 16 4 "${ARTIFACT}" 2>&1 | grep -i 'bad\|fail' >&2 || true
     printf '\n' >&2
     printf 'FAIL — native libraries are not stored 16 KB-aligned in the zip.\n' >&2
     printf '  This comes from the Android Gradle Plugin. Upgrade to AGP 8.5.1 or newer.\n' >&2
     exit "${EXIT_UNALIGNED}"
+  else
+    cannot_verify "zipalign could not perform the check (exit ${zipalign_status})." \
+      "It returns 1 when it has read the archive and found it misaligned;" \
+      "any other status means it never got that far, so nothing was measured." \
+      "The usual cause is build-tools older than 35, whose zipalign has no" \
+      "-P flag: ${ZIPALIGN}" \
+      "Install a newer one with: sdkmanager 'build-tools;35.0.0'"
   fi
 fi
 printf '\n'
@@ -359,7 +409,23 @@ else
   LIB_GLOB='lib/*'
   LIB_ROOT="${WORK}/lib"
 fi
-unzip -q "${ARTIFACT}" "${LIB_GLOB}" -d "${WORK}" >/dev/null 2>&1 || true
+# unzip's status is not discarded. If it refuses even one entry — an
+# unsupported compression method, a truncated archive, a full ${TMPDIR} — the
+# tree below is a SUBSET of the artifact, and measuring a subset while
+# printing PASS is the same green-without-looking answer as measuring
+# nothing. 0 is a clean extraction, 1 is "extracted, with warnings", and 11
+# is "nothing matched the glob", which the missing-LIB_ROOT check just below
+# reports properly.
+unzip_status=0
+unzip -q "${ARTIFACT}" "${LIB_GLOB}" -d "${WORK}" >/dev/null 2>&1 || unzip_status=$?
+case "${unzip_status}" in
+  0|1|11) ;;
+  *) cannot_verify "unzip could not read every ${LIB_GLOB} entry out of the artifact (exit ${unzip_status})." \
+       "Part of the archive was skipped, so a verdict here would cover some" \
+       "of the native libraries rather than all of them." \
+       "Usual causes: a compression method this unzip does not support, a" \
+       "truncated or corrupt archive, or no space left in \${TMPDIR}." ;;
+esac
 
 if [[ ! -d "${LIB_ROOT}" ]]; then
   cannot_verify "no native libraries found in the artifact." \
@@ -370,7 +436,8 @@ fi
 
 printf '==> ELF LOAD segment alignment (must be >= 2**14)\n'
 fail=0
-found64=0
+abis64=0     # 64-bit ABI directories present in the archive
+measured=0   # 64-bit .so files actually read
 for abi_dir in "${LIB_ROOT}"/*; do
   [[ -d "${abi_dir}" ]] || continue
   abi="$(basename "${abi_dir}")"
@@ -382,18 +449,37 @@ for abi_dir in "${LIB_ROOT}"/*; do
     printf '    %-14s [SKIP] 32-bit, exempt (%s libs)\n' "${abi}" "${n}"
     continue
   fi
-  found64=1
+  abis64=$(( abis64 + 1 ))
+  in_this_abi=0
 
   for so in "${abi_dir}"/*.so; do
     [[ -f "${so}" ]] || continue
     so_name="$(basename "${so}")"
+    in_this_abi=$(( in_this_abi + 1 ))
+    measured=$(( measured + 1 ))
 
     # objdump -p prints one 'align 2**N' per program header. Only LOAD
     # matters; anything below 2**14 breaks on a 16 KB-page device.
-    if ! aligns="$("${OBJDUMP}" -p "${so}" 2>/dev/null \
-                    | awk '$1=="LOAD"{for(i=1;i<=NF;i++) if($i=="align") print $(i+1)}')"; then
-      aligns=""
+    #
+    # objdump's exit status is read on its own, before any parsing. The two
+    # cases below look identical in the output — both produce no 'align'
+    # tokens — but they are opposite answers:
+    #
+    #   objdump ran and found no readable LOAD segments -> the ARTIFACT is
+    #   broken, which is a [FAIL].
+    #   objdump could not run at all -> nothing was measured, which is a 2.
+    #
+    # Collapsing the second into the first reports "Play will reject this
+    # upload" about a library the tool never managed to look at.
+    if ! raw="$("${OBJDUMP}" -p "${so}" 2>/dev/null)"; then
+      cannot_verify "${OBJDUMP##*/} could not read ${abi}/${so_name}." \
+        "Command: ${OBJDUMP} -p <${so_name}>" \
+        "Nothing was measured for this library, so the artifact is unproven." \
+        "Check that the objdump above runs on this machine, and that the" \
+        "artifact is not truncated or corrupt."
     fi
+    aligns="$(printf '%s\n' "${raw}" \
+                | awk '$1=="LOAD"{for(i=1;i<=NF;i++) if($i=="align") print $(i+1)}')"
 
     worst=99
     while read -r token; do
@@ -416,13 +502,29 @@ EOF
       printf '    %-14s %-38s [ok]   min align 2**%s\n' "${abi}" "${so_name}" "${worst}"
     fi
   done
+
+  # A 64-bit ABI directory holding no .so is not the same as one that passed,
+  # and it must not be reported by saying nothing. lib/<abi>/ can legitimately
+  # hold non-library files (wrap.sh, for one), so this shape does occur.
+  if (( in_this_abi == 0 )); then
+    printf '    %-14s [none] directory present but holds no .so\n' "${abi}" >&2
+  fi
 done
 
 printf '\n'
-if (( found64 == 0 )); then
+if (( abis64 == 0 )); then
   cannot_verify "the artifact contains no 64-bit ABI, so there is nothing to check." \
     "16 KB pages only apply to arm64-v8a and x86_64." \
     "A 32-bit-only build is not proof of anything about the 64-bit one."
+fi
+# A 64-bit directory that yielded no library leaves the run with a verdict on
+# nothing. Reporting PASS here would be the exact failure this tool exists to
+# refuse: a green result from an artifact that was never measured.
+if (( measured == 0 )); then
+  cannot_verify "no 64-bit library was read, so nothing was measured." \
+    "The artifact has a 64-bit ABI directory, but it contains no .so files." \
+    "Either this is not the artifact you meant to check, or its 64-bit" \
+    "native code is missing. Neither is evidence of alignment."
 fi
 if (( fail )); then
   printf 'FAIL — at least one 64-bit library is not 16 KB aligned.\n' >&2

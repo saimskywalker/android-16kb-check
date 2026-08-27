@@ -10,6 +10,43 @@ looks barely different.
 
 ## [Unreleased]
 
+### Fixed
+
+- An artifact whose 64-bit ABI directory contains no `.so` no longer reports
+  `PASS` and exits `0`. `lib/<abi>/` can hold files that are not libraries —
+  `wrap.sh`, for one — and such a run measured nothing at all while printing
+  a green result. It exits `2`, and the ABI directory is now reported as
+  `[none]` instead of being omitted.
+- `objdump` exiting non-zero is now `2` rather than `1`. A library the tool
+  could not read was being reported as `[FAIL] no LOAD segments readable`
+  under "Play will reject this upload", which claims a measurement that never
+  happened. A library where objdump *succeeds* and prints no readable LOAD
+  segments is still `[FAIL]`.
+- `--ndk ""` and `--bundletool ""` are rejected instead of being treated as if
+  the flag were absent. `--ndk "$UNSET_VAR"` used to fall through to
+  auto-detection, which is the silent fallback `--ndk` exists to prevent. The
+  `--ndk=` form already errored; the two forms now agree.
+- Auto-detection picks the highest installed NDK again. Versions were sorted as
+  whole paths on `.`, which put the directory prefix in field 1 where a numeric
+  compare reads it as `0`, so the major version was never compared: with
+  26.3.x, 27.0.x and 28.2.x installed it chose **26.3.x**.
+- `zipalign` failing to run is now `2` rather than `1`. Its status separates
+  the two cases — `1` means it read the archive and found it misaligned,
+  anything else means it never got that far — and build-tools older than 35
+  has no `-P` flag at all, so it exits `2` on the usage error. A correctly
+  aligned APK was being reported as "Play will reject this upload" by a tool
+  that had measured nothing. Same distinction the `objdump` entry above draws.
+- A partial extraction is `2` rather than a `PASS` over what did come out.
+  `unzip`'s exit status was discarded, so an archive holding an entry unzip
+  refuses — an unsupported compression method, a truncated file, a full
+  `${TMPDIR}` — was measured on the subset that extracted and reported green.
+- CI is green on `ubuntu-latest` again. `test/run.sh` disabled only `SC2329`
+  for its indirectly-invoked test bodies; the shellcheck 0.9 that Ubuntu ships
+  reports the same finding as `SC2317`, so the lint step failed there while
+  being clean on a current local shellcheck.
+- The documented install command works as written. It wrote to root-owned
+  `/usr/local/bin` without `sudo`, so it failed with `curl: (56)`.
+
 ## [1.0.0] - 2026-08-27
 
 First release.
