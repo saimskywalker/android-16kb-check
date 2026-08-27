@@ -30,6 +30,16 @@ looks barely different.
   whole paths on `.`, which put the directory prefix in field 1 where a numeric
   compare reads it as `0`, so the major version was never compared: with
   26.3.x, 27.0.x and 28.2.x installed it chose **26.3.x**.
+- `zipalign` failing to run is now `2` rather than `1`. Its status separates
+  the two cases — `1` means it read the archive and found it misaligned,
+  anything else means it never got that far — and build-tools older than 35
+  has no `-P` flag at all, so it exits `2` on the usage error. A correctly
+  aligned APK was being reported as "Play will reject this upload" by a tool
+  that had measured nothing. Same distinction the `objdump` entry above draws.
+- A partial extraction is `2` rather than a `PASS` over what did come out.
+  `unzip`'s exit status was discarded, so an archive holding an entry unzip
+  refuses — an unsupported compression method, a truncated file, a full
+  `${TMPDIR}` — was measured on the subset that extracted and reported green.
 - CI is green on `ubuntu-latest` again. `test/run.sh` disabled only `SC2329`
   for its indirectly-invoked test bodies; the shellcheck 0.9 that Ubuntu ships
   reports the same finding as `SC2317`, so the lint step failed there while

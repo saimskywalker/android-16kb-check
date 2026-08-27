@@ -90,6 +90,13 @@ non-zero is the other case and is a `2`: nothing was measured, so there is no
 verdict to report. Keep those two apart — reading a non-zero exit as `[FAIL]`
 announces "Play will reject this upload" about a file the tool never opened.
 
+**Any tool's exit status.** The objdump rule above is the general one, and it
+applies to `zipalign` and `unzip` too: a status that means "I could not do the
+check" must never be read as "the check failed". `zipalign` returns `1` for a
+misaligned archive and something else when it never looked — build-tools below
+35 has no `-P` and exits `2`. `unzip` returning anything but `0`, `1` or `11`
+means it skipped entries, so the extracted tree is a subset of the artifact.
+
 **Version comparison.** There is no portable `sort` spelling of it. `sort -V`
 is GNU-only, and `sort -t. -k1,1n` silently compares nothing but the minor
 field when the input is a path rather than a bare version, because the

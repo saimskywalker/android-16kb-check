@@ -87,6 +87,11 @@ Cases that deliberately return `2` rather than `0`:
 - `objdump` present but unable to read a library. That is a tool that could
   not look, not a library that failed; a failure to measure never becomes a
   measured failure.
+- `zipalign` present but unable to run the check. Build-tools older than 35
+  has no `-P` flag, so its zipalign exits on a usage error rather than
+  reporting an alignment; that is not an answer about the archive.
+- An archive `unzip` could only partly extract. Whatever came out is a subset
+  of the artifact, and a verdict on a subset is not a verdict on the upload.
 
 ## Install
 

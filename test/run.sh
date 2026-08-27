@@ -376,6 +376,31 @@ t_highest_ndk_wins() {
   assert_not_out "ndk/26.3.11579264/" || return 1
 }
 
+t_zipalign_that_cannot_run_is_two_not_one() {
+  # zipalign present but unable to do the check. Its status distinguishes the
+  # two: 1 is "read the archive, it is misaligned", anything else is "never
+  # got that far". Build-tools older than 35 has no -P flag and exits 2 on
+  # the usage error, so a correctly aligned APK was being reported as a Play
+  # rejection by a tool that had measured nothing.
+  TEST_ENV="STUB_ZIPALIGN_RC=2"
+  run_tool "${FIXTURES}/sample.apk"
+  assert_rc 2 || return 1
+  assert_out "could not perform the check" || return 1
+  assert_not_out "not stored 16 KB-aligned" || return 1
+  assert_not_out "PASS" || return 1
+}
+
+t_partial_extraction_is_two_not_pass() {
+  # unzip refuses one of the two 64-bit libraries and says so in its exit
+  # status. Discarding that status leaves a run that measured half the
+  # artifact and printed PASS — the same green-without-looking answer as
+  # measuring none of it.
+  run_tool "${FIXTURES}/unreadable-entry.apk"
+  assert_rc 2 || return 1
+  assert_out "Part of the archive was skipped" || return 1
+  assert_not_out "PASS" || return 1
+}
+
 t_only_32bit_is_two_not_zero() {
   # A 32-bit-only artifact proves nothing about the 64-bit build users install.
   run_tool "${FIXTURES}/only-32bit.apk"
@@ -502,6 +527,8 @@ check "missing zipalign exits 2"                    t_missing_zipalign_is_two
 check "missing bundletool jar exits 2"              t_missing_bundletool_jar_is_two
 check "an artifact with no .so exits 2"             t_artifact_without_native_libs_is_two
 check "a 32-bit-only artifact exits 2, not 0"       t_only_32bit_is_two_not_zero
+check "a zipalign that cannot run exits 2, not 1"   t_zipalign_that_cannot_run_is_two_not_one
+check "a partly-extractable archive exits 2"        t_partial_extraction_is_two_not_pass
 check "a 64-bit dir with no .so exits 2, not 0"     t_sixtyfour_bit_dir_with_no_libs_is_two
 check "a 64-bit dir with no .so is reported"        t_sixtyfour_bit_dir_with_no_libs_is_reported
 check "an objdump that cannot run exits 2, not 1"   t_objdump_that_cannot_run_is_two_not_one

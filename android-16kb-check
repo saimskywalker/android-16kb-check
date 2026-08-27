@@ -368,15 +368,30 @@ if [[ "${KIND}" == "aab" ]]; then
     exit "${EXIT_UNALIGNED}"
   fi
 else
-  if "${ZIPALIGN}" -c -P 16 4 "${ARTIFACT}" >/dev/null 2>&1; then
+  # zipalign's status is read on its own, for the same reason objdump's is
+  # below: 1 means it checked the archive and found it misaligned, and
+  # anything above that means it never got as far as checking. The case that
+  # actually happens is build-tools older than 35, whose zipalign has no -P
+  # flag at all and exits 2 on the usage error — reading that as "not
+  # aligned" announces a rejection about an archive nobody measured.
+  zipalign_status=0
+  "${ZIPALIGN}" -c -P 16 4 "${ARTIFACT}" >/dev/null 2>&1 || zipalign_status=$?
+  if (( zipalign_status == 0 )); then
     printf '    [ok]   zipalign -c -P 16 4: verification successful\n'
-  else
+  elif (( zipalign_status == 1 )); then
     printf '    [FAIL] zipalign reports the APK is not 16 KB aligned\n' >&2
     "${ZIPALIGN}" -v -c -P 16 4 "${ARTIFACT}" 2>&1 | grep -i 'bad\|fail' >&2 || true
     printf '\n' >&2
     printf 'FAIL — native libraries are not stored 16 KB-aligned in the zip.\n' >&2
     printf '  This comes from the Android Gradle Plugin. Upgrade to AGP 8.5.1 or newer.\n' >&2
     exit "${EXIT_UNALIGNED}"
+  else
+    cannot_verify "zipalign could not perform the check (exit ${zipalign_status})." \
+      "It returns 1 when it has read the archive and found it misaligned;" \
+      "any other status means it never got that far, so nothing was measured." \
+      "The usual cause is build-tools older than 35, whose zipalign has no" \
+      "-P flag: ${ZIPALIGN}" \
+      "Install a newer one with: sdkmanager 'build-tools;35.0.0'"
   fi
 fi
 printf '\n'
@@ -394,7 +409,23 @@ else
   LIB_GLOB='lib/*'
   LIB_ROOT="${WORK}/lib"
 fi
-unzip -q "${ARTIFACT}" "${LIB_GLOB}" -d "${WORK}" >/dev/null 2>&1 || true
+# unzip's status is not discarded. If it refuses even one entry — an
+# unsupported compression method, a truncated archive, a full ${TMPDIR} — the
+# tree below is a SUBSET of the artifact, and measuring a subset while
+# printing PASS is the same green-without-looking answer as measuring
+# nothing. 0 is a clean extraction, 1 is "extracted, with warnings", and 11
+# is "nothing matched the glob", which the missing-LIB_ROOT check just below
+# reports properly.
+unzip_status=0
+unzip -q "${ARTIFACT}" "${LIB_GLOB}" -d "${WORK}" >/dev/null 2>&1 || unzip_status=$?
+case "${unzip_status}" in
+  0|1|11) ;;
+  *) cannot_verify "unzip could not read every ${LIB_GLOB} entry out of the artifact (exit ${unzip_status})." \
+       "Part of the archive was skipped, so a verdict here would cover some" \
+       "of the native libraries rather than all of them." \
+       "Usual causes: a compression method this unzip does not support, a" \
+       "truncated or corrupt archive, or no space left in \${TMPDIR}." ;;
+esac
 
 if [[ ! -d "${LIB_ROOT}" ]]; then
   cannot_verify "no native libraries found in the artifact." \
