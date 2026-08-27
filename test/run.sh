@@ -15,8 +15,11 @@
 
 # Test bodies and assertion helpers are invoked indirectly, by name, from
 # check(). ShellCheck cannot see that, so it reports every one of them as dead
-# code.
-# shellcheck disable=SC2329
+# code. BOTH codes are needed: shellcheck <= 0.9 reports it as SC2317, and
+# 0.10 onward split the function case out into SC2329. Disabling only SC2329
+# is clean on a current local shellcheck and red on ubuntu-latest, which still
+# ships 0.9.
+# shellcheck disable=SC2317,SC2329
 
 set -uo pipefail
 
@@ -302,6 +305,77 @@ t_artifact_without_native_libs_is_two() {
   assert_not_out "PASS" || return 1
 }
 
+t_sixtyfour_bit_dir_with_no_libs_is_two() {
+  # lib/arm64-v8a/ exists but holds no .so — only a wrap.sh. Nothing 64-bit was
+  # measured, so there is no basis for a pass. Before this was fixed the run
+  # printed PASS and exited 0 without naming arm64-v8a anywhere: a green gate
+  # over an artifact the tool had not read.
+  run_tool "${FIXTURES}/empty-64bit-abi.apk"
+  assert_rc 2 || return 1
+  assert_out "nothing was measured" || return 1
+  assert_not_out "PASS" || return 1
+}
+
+t_sixtyfour_bit_dir_with_no_libs_is_reported() {
+  # And it has to be said out loud. A 64-bit ABI mentioned nowhere in the
+  # report reads exactly like one that passed.
+  run_tool "${FIXTURES}/empty-64bit-abi.apk"
+  assert_out "arm64-v8a" || return 1
+  assert_out "[none]" || return 1
+}
+
+t_objdump_that_cannot_run_is_two_not_one() {
+  # objdump present but unable to read the file. Nothing was measured, so this
+  # is "could not verify", not "Play will reject this upload" — the second
+  # sends someone hunting an alignment bug that was never observed.
+  TEST_ENV="STUB_OBJDUMP_FAIL=1"
+  run_tool "${FIXTURES}/sample.apk"
+  assert_rc 2 || return 1
+  assert_out "could not read" || return 1
+  assert_not_out "Play will reject" || return 1
+  assert_not_out "PASS" || return 1
+}
+
+t_empty_ndk_value_is_rejected() {
+  # --ndk "$UNSET_VAR" must not degrade into "no --ndk given". Falling back to
+  # auto-detection after being handed an explicit NDK is the silent-fallback
+  # behaviour --ndk exists to prevent.
+  run_tool --ndk "" "${FIXTURES}/sample.apk"
+  assert_rc 2 || return 1
+  assert_out "--ndk requires a value" || return 1
+  assert_not_out "PASS" || return 1
+}
+
+t_empty_bundletool_value_is_rejected() {
+  run_tool --bundletool "" "${FIXTURES}/sample.aab"
+  assert_rc 2 || return 1
+  assert_out "--bundletool requires a value" || return 1
+  assert_not_out "PASS" || return 1
+}
+
+t_highest_ndk_wins() {
+  # 26.3.x must not beat 28.2.x. Sorting whole paths on '.' put the directory
+  # prefix in field 1, where a numeric compare reads it as 0 on both BSD and
+  # GNU sort, so the major version was never compared and the run silently
+  # used an older NDK than the one it advertises. The '==> objdump' header
+  # names the NDK that was chosen, so assert on that.
+  local sdk="${TMPROOT}/sdk-many-ndks"
+  local v bin
+  rm -rf "${sdk}"
+  for v in 9.0.8775105 26.3.11579264 27.0.12077973 28.2.13676358; do
+    bin="${sdk}/ndk/${v}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+    mkdir -p "${bin}"
+    ln -sf "${STUBS}/llvm-objdump" "${bin}/llvm-objdump"
+  done
+  # No objdump on PATH, so the only way to resolve one is through the SDK.
+  TEST_PATH="${BARE_BIN}"
+  TEST_ENV="ANDROID_HOME=${sdk} BUNDLETOOL=${STUBS}/bundletool"
+  run_tool "${FIXTURES}/sample.aab"
+  assert_rc 0 || return 1
+  assert_out "ndk/28.2.13676358/" || return 1
+  assert_not_out "ndk/26.3.11579264/" || return 1
+}
+
 t_only_32bit_is_two_not_zero() {
   # A 32-bit-only artifact proves nothing about the 64-bit build users install.
   run_tool "${FIXTURES}/only-32bit.apk"
@@ -428,6 +502,12 @@ check "missing zipalign exits 2"                    t_missing_zipalign_is_two
 check "missing bundletool jar exits 2"              t_missing_bundletool_jar_is_two
 check "an artifact with no .so exits 2"             t_artifact_without_native_libs_is_two
 check "a 32-bit-only artifact exits 2, not 0"       t_only_32bit_is_two_not_zero
+check "a 64-bit dir with no .so exits 2, not 0"     t_sixtyfour_bit_dir_with_no_libs_is_two
+check "a 64-bit dir with no .so is reported"        t_sixtyfour_bit_dir_with_no_libs_is_reported
+check "an objdump that cannot run exits 2, not 1"   t_objdump_that_cannot_run_is_two_not_one
+check "an empty --ndk value is rejected"            t_empty_ndk_value_is_rejected
+check "an empty --bundletool value is rejected"     t_empty_bundletool_value_is_rejected
+check "the highest installed NDK is chosen"         t_highest_ndk_wins
 check "an aligned APK exits 0"                      t_apk_aligned_passes
 check "32-bit ABIs are reported as SKIP"            t_apk_reports_32bit_as_skip
 check "over-aligned libraries pass"                 t_apk_over_aligned_passes

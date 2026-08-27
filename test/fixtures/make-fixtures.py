@@ -33,3 +33,11 @@ make("only-32bit.apk", [
     ("AndroidManifest.xml", b"fixture\n"),
     ("lib/armeabi-v7a/liblegacy.so", SO),
 ])
+# A 64-bit ABI directory that holds no .so. wrap.sh is a real file Android
+# looks for at lib/<abi>/wrap.sh, so this shape is not hypothetical. There is
+# no 64-bit library here to measure, which makes it a 2 and not a pass.
+make("empty-64bit-abi.apk", [
+    ("AndroidManifest.xml", b"fixture\n"),
+    ("lib/arm64-v8a/wrap.sh", b"#!/system/bin/sh\nexec \"$@\"\n"),
+    ("lib/armeabi-v7a/liblegacy.so", SO),
+])

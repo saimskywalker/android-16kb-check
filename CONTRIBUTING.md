@@ -20,7 +20,14 @@ CI runs the same two commands on `ubuntu-latest`, plus a check that the script
 is still executable and that a run with no toolchain exits 2. shellcheck must
 be clean — not "clean apart from the informational ones". If a finding is
 genuinely wrong, disable it by number with a comment saying why, the way
-`test/run.sh` does for `SC2329`.
+`test/run.sh` does for `SC2317,SC2329`.
+
+Mind the version gap while you are there: `ubuntu-latest` still installs
+shellcheck 0.9, and a current local shellcheck is 0.11. They do not always use
+the same code for the same finding — indirectly-invoked functions are SC2317
+on 0.9 and SC2329 from 0.10 onward — so a disable that names only one of a
+pair is clean on the laptop and red on CI. Disabling both is harmless; an
+unknown code is ignored rather than reported.
 
 ## The exit codes are the interface
 
@@ -77,7 +84,17 @@ authoritative, and quietly using a different one is worse than failing.
 **Parsing objdump output.** The ELF check reads `align 2**N` out of
 `objdump -p`. GNU objdump and llvm-objdump both print that form today; a change
 in either could silently produce zero matches, which is why a library with no
-readable LOAD segments is a `[FAIL]` and not a shrug.
+readable LOAD segments is a `[FAIL]` and not a shrug. That is specifically the
+case where objdump *ran* and its output held nothing usable. objdump exiting
+non-zero is the other case and is a `2`: nothing was measured, so there is no
+verdict to report. Keep those two apart — reading a non-zero exit as `[FAIL]`
+announces "Play will reject this upload" about a file the tool never opened.
+
+**Version comparison.** There is no portable `sort` spelling of it. `sort -V`
+is GNU-only, and `sort -t. -k1,1n` silently compares nothing but the minor
+field when the input is a path rather than a bare version, because the
+directory prefix in field 1 reads as `0` under both BSD and GNU. `version_gt`
+does it in bash for that reason; prefer it to adding a `sort` call.
 
 **Anything printed to stdout on the passing path.** People pipe this into build
 scripts. Keep failures and diagnostics on stderr.
